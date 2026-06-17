@@ -1,6 +1,6 @@
 /* sw.js — minimal offline cache for the app shell.
    Bump CACHE when you change any cached file so clients pick up the update. */
-const CACHE = "eml-inspector-v2";
+const CACHE = "eml-inspector-v3";
 const SHELL = [
   "./",
   "./index.html",
