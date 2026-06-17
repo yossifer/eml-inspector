@@ -83,7 +83,12 @@ export function renderMessage(viewEl, doc, state, actions) {
 
   let attHtml = "";
   if (m.attachments.length) {
-    attHtml = `<div class="att-head">Attachments · ${m.attachments.length}</div><div class="att-grid">` +
+    attHtml = `<div class="att-head" style="display:flex;align-items:center;gap:12px;">` +
+      `<span>Attachments · ${m.attachments.length}</span>` +
+      (m.attachments.length > 1
+        ? `<button class="btn accent" id="dlAll" style="margin-left:auto;padding:5px 12px;font-size:12px;">Download all (.zip)</button>`
+        : "") +
+      `</div><div class="att-grid">` +
       m.attachments.map((a, i) => {
         const tag = (a.mimeType.split("/")[1] || a.mimeType.split("/")[0] || "bin").slice(0, 4).toUpperCase();
         return `<div class="att">
@@ -124,6 +129,8 @@ export function renderMessage(viewEl, doc, state, actions) {
   if (lr) lr.addEventListener("click", () => actions.loadRemote());
   viewEl.querySelectorAll("button[data-att]").forEach(b =>
     b.addEventListener("click", () => { const a = m.attachments[+b.dataset.att]; actions.download(a.bytes, a.filename, a.mimeType); }));
+  const da = viewEl.querySelector("#dlAll");
+  if (da) da.addEventListener("click", () => actions.downloadAll(m.attachments, doc.name));
   const de = viewEl.querySelector("#dlEml");
   if (de) de.addEventListener("click", () => actions.download(binStrToBytes(m.raw), doc.name || "message.eml", "message/rfc822"));
 }
