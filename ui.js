@@ -1,209 +1,129 @@
 /**
- * mime.js — RFC 5322 / MIME parser for .eml messages.
+ * ui.js — rendering. Takes a parsed message (the shape from mime.js) plus a
+ * small view-state object, and paints the DOM. No parsing logic lives here.
  *
- * Pure, dependency-free, framework-free. This is the file you (or Claude Code)
- * will extend most often. It exports a single high-level function:
- *
- *   parseMessage(uint8) -> {
- *     headers,        // { 'header-name': 'value', ... } (lowercased keys)
- *     subject, from, to, cc, bcc, replyTo, date,   // decoded convenience fields
- *     html,           // string | null  (decoded HTML body, if present)
- *     text,           // string | null  (decoded plain-text body, if present)
- *     attachments,    // [{ filename, mimeType, disposition, bytes, size }]
- *     raw             // binary string of the original bytes (for "Save .eml")
- *   }
- *
- * To add .msg support later, write a sibling msg.js that returns the SAME shape,
- * and have app.js pick the parser by file extension / magic bytes. Everything
- * downstream (ui.js) only depends on that shape, so nothing else needs to change.
+ * Add UI features here (new buttons, panels, columns). Add *parsing* features
+ * in mime.js. Keeping that line clean is what makes the app easy to grow.
  */
+import { binStrToBytes } from "./mime.js";
 
-/* ---------- byte / string helpers ---------- */
-export function bytesToBinaryString(u8) {
-  let s = ""; const C = 0x8000;
-  for (let i = 0; i < u8.length; i += C) s += String.fromCharCode.apply(null, u8.subarray(i, i + C));
-  return s;
+export function esc(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-export function binStrToBytes(str) {
-  const b = new Uint8Array(str.length);
-  for (let i = 0; i < str.length; i++) b[i] = str.charCodeAt(i) & 0xff;
-  return b;
+export function fmtSize(n) {
+  if (n == null) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
 }
-function base64ToBytes(b64) {
-  try {
-    const bin = atob(b64.replace(/[^A-Za-z0-9+/=]/g, ""));
-    const b = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
-    return b;
-  } catch (e) { return new Uint8Array(0); }
-}
-function qpToBytes(str) {
-  str = str.replace(/=\r?\n/g, ""); // soft line breaks
-  const out = [];
-  for (let i = 0; i < str.length; i++) {
-    if (str[i] === "=") {
-      const hex = str.substr(i + 1, 2);
-      if (/^[0-9A-Fa-f]{2}$/.test(hex)) { out.push(parseInt(hex, 16)); i += 2; continue; }
-    }
-    out.push(str.charCodeAt(i) & 0xff);
-  }
-  return new Uint8Array(out);
-}
-function pctToBytes(s) {
-  const out = [];
-  for (let i = 0; i < s.length; i++) {
-    if (s[i] === "%" && /^[0-9A-Fa-f]{2}$/.test(s.substr(i + 1, 2))) { out.push(parseInt(s.substr(i + 1, 2), 16)); i += 2; }
-    else out.push(s.charCodeAt(i) & 0xff);
-  }
-  return new Uint8Array(out);
-}
-function normCharset(cs) {
-  if (!cs) return "utf-8";
-  cs = cs.toLowerCase().trim().replace(/['"]/g, "");
-  if (cs === "us-ascii" || cs === "ascii" || cs === "") return "utf-8";
-  return cs;
-}
-function decodeText(bytes, charset) {
-  try { return new TextDecoder(normCharset(charset)).decode(bytes); }
-  catch (e) { try { return new TextDecoder("utf-8").decode(bytes); } catch (_) { return bytesToBinaryString(bytes); } }
+function fmtDate(raw) {
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return esc(raw);
+  return esc(raw) + '  <span style="color:var(--faint)">(' + d.toLocaleString() + ")</span>";
 }
 
-/* ---------- RFC 2047 encoded words (=?utf-8?B?..?=) ---------- */
-export function decodeWords(str) {
-  if (!str) return "";
-  str = str.replace(/(=\?[^?]+\?[BbQq]\?[^?]*\?=)\s+(?==\?[^?]+\?[BbQq]\?)/g, "$1");
-  return str.replace(/=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g, (m, cs, enc, txt) => {
-    try {
-      const bytes = enc.toUpperCase() === "B" ? base64ToBytes(txt) : qpToBytes(txt.replace(/_/g, " "));
-      return decodeText(bytes, cs);
-    } catch (e) { return m; }
+/** Rewrite remote image/background/url() references so they don't load until asked. */
+export function blockRemote(html) {
+  let count = 0; const bump = () => count++;
+  const out = html
+    .replace(/(\s)(src)\s*=\s*("|')\s*(https?:\/\/[^"']*)\3/gi, (m, sp, a, q, url) => { bump(); return sp + "data-blocked-src=" + q + url + q; })
+    .replace(/(\s)(background)\s*=\s*("|')\s*(https?:\/\/[^"']*)\3/gi, (m, sp, a, q, url) => { bump(); return sp + "data-blocked-bg=" + q + url + q; })
+    .replace(/url\(\s*(['"]?)(https?:\/\/[^)'"]*)\1\s*\)/gi, () => { bump(); return "url()"; });
+  return { html: out, blocked: count };
+}
+
+export function renderList(listEl, docs, activeId, onSelect) {
+  listEl.innerHTML = "";
+  docs.forEach(d => {
+    const li = document.createElement("li");
+    li.className = "fileitem" + (d.id === activeId ? " active" : "");
+    li.innerHTML = `<div class="fn"></div><div class="meta"></div>`;
+    li.querySelector(".fn").textContent = d.msg.subject || "(no subject)";
+    li.querySelector(".meta").textContent = d.name + " · " + fmtSize(d.size);
+    li.addEventListener("click", () => onSelect(d.id));
+    listEl.appendChild(li);
   });
 }
 
-/* ---------- header + structure parsing ---------- */
-function splitHeadersBody(raw) {
-  const m = raw.match(/\r?\n\r?\n/);
-  if (!m) return { headerText: raw, body: "" };
-  return { headerText: raw.slice(0, m.index), body: raw.slice(m.index + m[0].length) };
-}
-function parseHeaders(headerText) {
-  const unfolded = headerText.replace(/\r?\n[ \t]+/g, " ");
-  const headers = {};
-  for (const line of unfolded.split(/\r?\n/)) {
-    const i = line.indexOf(":");
-    if (i === -1) continue;
-    const k = line.slice(0, i).trim().toLowerCase();
-    const v = line.slice(i + 1).trim();
-    headers[k] = headers[k] !== undefined ? headers[k] + ", " + v : v;
-  }
-  return headers;
-}
-function parseContentType(val) {
-  if (!val) return { type: "text/plain", params: {} };
-  const segs = val.split(";");
-  const type = segs[0].trim().toLowerCase();
-  const params = {};
-  for (let i = 1; i < segs.length; i++) {
-    const eq = segs[i].indexOf("=");
-    if (eq === -1) continue;
-    params[segs[i].slice(0, eq).trim().toLowerCase()] = segs[i].slice(eq + 1).trim().replace(/^"|"$/g, "");
-  }
-  return { type, params };
-}
-function paramFrom(value, key) {
-  if (!value) return null;
-  let m = value.match(new RegExp(key + '\\s*=\\s*"([^"]*)"', "i"));
-  if (m) return m[1];
-  m = value.match(new RegExp(key + "\\s*=\\s*([^;\\s]+)", "i"));
-  return m ? m[1] : null;
-}
-function decode2231(value, key) {
-  if (!value) return null;
-  const m = value.match(new RegExp(key + "\\*\\s*=\\s*([^;]+)", "i"));
-  if (!m) return null;
-  const v = m[1].trim().replace(/^"|"$/g, "");
-  const parts = v.split("'");
-  if (parts.length >= 3) {
-    try { return decodeText(pctToBytes(parts.slice(2).join("'")), parts[0]); }
-    catch (e) { try { return decodeURIComponent(v); } catch (_) { return v; } }
-  }
-  try { return decodeURIComponent(v); } catch (_) { return v; }
-}
-function getFilename(headers) {
-  const cd = headers["content-disposition"] || "";
-  const ct = headers["content-type"] || "";
-  let fn = paramFrom(cd, "filename") || paramFrom(ct, "name");
-  if (!fn) fn = decode2231(cd, "filename") || decode2231(ct, "name");
-  return fn ? decodeWords(fn) : null;
-}
+/**
+ * @param viewEl   container element
+ * @param doc      { id, name, size, msg }  (msg = parseMessage output)
+ * @param state    { bodyMode: "auto"|"text"|"raw", showRemote: bool }
+ * @param actions  { setMode(mode), loadRemote(), download(bytes,name,type) }
+ */
+export function renderMessage(viewEl, doc, state, actions) {
+  const m = doc.msg;
+  const field = (label, value, addr) => value
+    ? `<div class="field"><div class="k">${label}</div><div class="v ${addr ? "addr" : ""}">${esc(value)}</div></div>`
+    : "";
 
-function parsePart(raw) {
-  const { headerText, body } = splitHeadersBody(raw);
-  const headers = parseHeaders(headerText);
-  const ct = parseContentType(headers["content-type"]);
-  const part = { headers, ct, body, children: [] };
-  if (ct.type.startsWith("multipart/") && ct.params.boundary) {
-    for (const seg of splitMultipart(body, ct.params.boundary)) part.children.push(parsePart(seg));
+  const hasHtml = m.html != null, hasText = m.text != null;
+  let blocked = 0, htmlForFrame = "";
+  if (hasHtml) {
+    if (state.showRemote) htmlForFrame = m.html;
+    else { const r = blockRemote(m.html); htmlForFrame = r.html; blocked = r.blocked; }
   }
-  return part;
-}
-function splitMultipart(body, boundary) {
-  const delim = "--" + boundary;
-  const lines = body.split(/\r?\n/);
-  const parts = []; let cur = null;
-  for (const line of lines) {
-    if (line === delim || line === delim + "--") {
-      if (cur !== null) parts.push(cur.join("\r\n"));
-      if (line === delim + "--") { cur = null; break; }
-      cur = [];
-    } else if (cur !== null) cur.push(line);
+
+  const mode = state.bodyMode === "auto" ? (hasHtml ? "html" : (hasText ? "text" : "raw")) : state.bodyMode;
+  let bodyHtml;
+  if (mode === "raw") bodyHtml = `<div class="body-wrap"><pre class="raw">${esc(m.raw)}</pre></div>`;
+  else if (mode === "text" || (!hasHtml && hasText)) bodyHtml = `<div class="body-wrap"><pre class="body-text">${esc(m.text != null ? m.text : "(no plain-text body)")}</pre></div>`;
+  else if (hasHtml) bodyHtml = `<div class="body-wrap"><iframe class="body" sandbox referrerpolicy="no-referrer"></iframe></div>`;
+  else bodyHtml = `<div class="body-wrap"><pre class="body-text">(no readable body — use Raw to see source)</pre></div>`;
+
+  const seg = `<div class="seg">
+    <button data-mode="auto" class="${state.bodyMode === "auto" ? "on" : ""}">Rendered</button>
+    <button data-mode="text" class="${state.bodyMode === "text" ? "on" : ""}" ${hasText ? "" : "disabled"}>Plain text</button>
+    <button data-mode="raw" class="${state.bodyMode === "raw" ? "on" : ""}">Raw source</button>
+  </div>`;
+
+  const notice = (hasHtml && mode !== "raw" && mode !== "text" && blocked > 0 && !state.showRemote)
+    ? `<div class="notice">🔒 Blocked ${blocked} remote resource${blocked > 1 ? "s" : ""} (images / tracking pixels).<button class="btn" id="loadRemote">Load remote content</button></div>` : "";
+
+  let attHtml = "";
+  if (m.attachments.length) {
+    attHtml = `<div class="att-head">Attachments · ${m.attachments.length}</div><div class="att-grid">` +
+      m.attachments.map((a, i) => {
+        const tag = (a.mimeType.split("/")[1] || a.mimeType.split("/")[0] || "bin").slice(0, 4).toUpperCase();
+        return `<div class="att">
+          <div class="ic">${esc(tag)}</div>
+          <div class="info"><div class="name" title="${esc(a.filename)}">${esc(a.filename)}</div>
+            <div class="sub">${esc(a.mimeType)} · ${fmtSize(a.size)}</div></div>
+          <div class="dl"><button class="btn accent" data-att="${i}">Download</button></div>
+        </div>`;
+      }).join("") + `</div>`;
   }
-  return parts;
-}
 
-function decodePartBytes(part) {
-  const enc = (part.headers["content-transfer-encoding"] || "").trim().toLowerCase();
-  if (enc === "base64") return base64ToBytes(part.body);
-  if (enc === "quoted-printable") return qpToBytes(part.body);
-  return binStrToBytes(part.body);
-}
-const EXT = { "application/pdf": ".pdf", "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "text/calendar": ".ics", "application/zip": ".zip" };
-function collect(part, acc) {
-  if (part.ct.type.startsWith("multipart/")) { for (const c of part.children) collect(c, acc); return; }
-  const disp = (part.headers["content-disposition"] || "").split(";")[0].trim().toLowerCase();
-  const fn = getFilename(part.headers);
-  const type = part.ct.type;
-  const bytes = decodePartBytes(part);
-  const isText = type === "text/plain" || type === "text/html";
-  const isAttachment = disp === "attachment" || (!!fn && disp !== "inline") || (!!fn && !isText) || (!isText && type !== "");
+  viewEl.innerHTML = `
+    <div class="envelope">
+      <div class="subject"><div class="lbl">Subject</div><h2>${esc(m.subject || "(no subject)")}</h2></div>
+      <div class="fields">
+        ${field("From", m.from, true)}
+        ${field("To", m.to, true)}
+        ${field("Cc", m.cc, true)}
+        ${field("Bcc", m.bcc, true)}
+        ${field("Reply-To", m.replyTo, true)}
+        ${m.date ? `<div class="field"><div class="k">Date</div><div class="v">${fmtDate(m.date)}</div></div>` : ""}
+      </div>
+    </div>
+    <div class="bar">${seg}<button class="btn" id="dlEml">Save .eml</button></div>
+    ${notice}
+    ${bodyHtml}
+    ${attHtml}`;
 
-  if (!isAttachment && type === "text/html" && acc.html === null) acc.html = decodeText(bytes, part.ct.params.charset);
-  else if (!isAttachment && type === "text/plain" && acc.text === null) acc.text = decodeText(bytes, part.ct.params.charset);
-  else acc.attachments.push({
-    filename: fn || ("part-" + (acc.attachments.length + 1) + (EXT[type] || "")),
-    mimeType: type || "application/octet-stream",
-    disposition: disp || "inline",
-    bytes, size: bytes.length
-  });
-}
+  if (mode !== "raw" && mode !== "text" && hasHtml) {
+    const frame = viewEl.querySelector("iframe.body");
+    if (frame) frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><base target="_blank">` +
+      `<style>body{font-family:system-ui,Arial,sans-serif;margin:16px;color:#16202B;}</style></head><body>${htmlForFrame}</body></html>`;
+  }
 
-/* ---------- public entry point ---------- */
-export function parseMessage(uint8) {
-  const raw = bytesToBinaryString(uint8);
-  const tree = parsePart(raw);
-  const acc = { html: null, text: null, attachments: [] };
-  collect(tree, acc);
-  const h = tree.headers;
-  return {
-    headers: h,
-    subject: decodeWords(h["subject"] || ""),
-    from: decodeWords(h["from"] || ""),
-    to: decodeWords(h["to"] || ""),
-    cc: decodeWords(h["cc"] || ""),
-    bcc: decodeWords(h["bcc"] || ""),
-    replyTo: decodeWords(h["reply-to"] || ""),
-    date: h["date"] || "",
-    html: acc.html, text: acc.text, attachments: acc.attachments,
-    raw
-  };
+  viewEl.querySelectorAll(".seg button[data-mode]").forEach(b =>
+    b.addEventListener("click", () => { if (!b.disabled) actions.setMode(b.dataset.mode); }));
+  const lr = viewEl.querySelector("#loadRemote");
+  if (lr) lr.addEventListener("click", () => actions.loadRemote());
+  viewEl.querySelectorAll("button[data-att]").forEach(b =>
+    b.addEventListener("click", () => { const a = m.attachments[+b.dataset.att]; actions.download(a.bytes, a.filename, a.mimeType); }));
+  const de = viewEl.querySelector("#dlEml");
+  if (de) de.addEventListener("click", () => actions.download(binStrToBytes(m.raw), doc.name || "message.eml", "message/rfc822"));
 }

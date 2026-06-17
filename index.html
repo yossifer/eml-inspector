@@ -1,5 +1,38 @@
-{
-  "projects": {
-    "default": "YOUR_FIREBASE_PROJECT_ID"
-  }
-}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0B7A6B">
+  <title>EML Inspector</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon-192.png">
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <h1>EML Inspector</h1>
+        <p>Local-only · nothing leaves this device</p>
+      </div>
+      <label class="drop" id="drop" tabindex="0" role="button" aria-label="Open .eml files">
+        <strong>Drop .eml files here</strong>
+        or click to browse
+        <span class="hint">.eml · parsed in-browser</span>
+        <input type="file" id="file" accept=".eml,.mht,.txt,message/rfc822" multiple hidden>
+      </label>
+      <ul class="filelist" id="filelist"></ul>
+      <div class="side-foot">No accounts, no upload, no network. Works offline once installed.</div>
+    </aside>
+    <main class="main" id="main">
+      <div class="empty" id="empty">
+        <div class="glyph">{ }</div>
+        <div>Drop an <strong>.eml</strong> file to inspect its headers, body, and attachments.</div>
+      </div>
+      <div id="view" hidden></div>
+    </main>
+  </div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
